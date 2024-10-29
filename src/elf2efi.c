@@ -249,6 +249,7 @@ static struct pe_header efi_pe_header = {
 			.MinorLinkerVersion = 42,
 			.SectionAlignment = EFI_IMAGE_ALIGN,
 			.FileAlignment = EFI_FILE_ALIGN,
+			.MajorImageVersion = 1,
 			.SizeOfImage = EFI_IMAGE_ALIGN,
 			.SizeOfHeaders =
 				( sizeof ( efi_pe_header ) -
