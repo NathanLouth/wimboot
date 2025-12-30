@@ -36,6 +36,8 @@
 #include "efi.h"
 #include "efipath.h"
 #include "efifile.h"
+#include "efi/Protocol/LoadFile2.h"
+#include "efi/Guid/LinuxEfiInitrdMedia.h"
 
 /** bootmgfw.efi path within WIM */
 static const wchar_t bootmgfw_path[] = L"\\Windows\\Boot\\EFI\\bootmgfw.efi";

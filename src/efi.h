@@ -49,5 +49,6 @@ extern EFI_GUID efi_graphics_output_protocol_guid;
 extern EFI_GUID efi_loaded_image_protocol_guid;
 extern EFI_GUID efi_simple_file_system_protocol_guid;
 extern EFI_GUID efi_global_variable_guid;
+extern EFI_GUID efi_load_file2_protocol_guid;
 
 #endif /* _EFI_H */
