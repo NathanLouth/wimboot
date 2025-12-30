@@ -38,6 +38,7 @@
 #include "efifile.h"
 #include "efi/Protocol/LoadFile2.h"
 #include "efi/Guid/LinuxEfiInitrdMedia.h"
+#include "cpio.h"
 
 /** bootmgfw.efi path within WIM */
 static const wchar_t bootmgfw_path[] = L"\\Windows\\Boot\\EFI\\bootmgfw.efi";
@@ -64,6 +65,26 @@ struct vdisk_file *bootmgfw;
 
 /** bootmgfw_EX.efi file */
 struct vdisk_file *bootmgfw_ex;
+
+/** WIM image file (from initrd or filesystem) */
+static struct vdisk_file *bootwim;
+
+/** Linux initrd media device path */
+static struct {
+    VENDOR_DEVICE_PATH vendor;
+    EFI_DEVICE_PATH_PROTOCOL end;
+} __attribute__ ((packed)) efi_initrd_path = {
+    .vendor = {
+        .Header = EFI_DEVPATH_INIT (efi_initrd_path.vendor,
+                        MEDIA_DEVICE_PATH, MEDIA_VENDOR_DP),
+        .Guid = LINUX_EFI_INITRD_MEDIA_GUID,
+    },
+    .end = EFI_DEVPATH_END_INIT (efi_initrd_path.end),
+};
+
+/** Read function pointer used by vdisk files added from initrd */
+static void ( *efi_read_func ) ( struct vdisk_file *file, void *data,
+                 size_t offset, size_t len );
 
 /**
  * Read from EFI file
@@ -124,6 +145,96 @@ static void efi_patch_bcd ( struct vdisk_file *vfile __unused, void *data,
 }
 
 /**
+ * Add file from initrd
+ *
+ * @v name      File name
+ * @v data      File data
+ * @v len       Length
+ * @ret rc      Return status code
+ */
+static int efi_add_file ( const char *name, void *data, size_t len ) {
+    struct vdisk_file *vfile;
+    size_t nlen = strlen ( name );
+
+    vfile = vdisk_add_file ( name, data, len, efi_read_func );
+
+    /* Detect bootloaders and WIM files */
+    if ( strcasecmp ( name, "bootmgfw.efi" ) == 0 ) {
+        DBG ( "...found bootmgfw.efi in initrd: %s\n", name );
+        bootmgfw = vfile;
+    } else if ( strcasecmp ( name, "bootmgfw_EX.efi" ) == 0 ) {
+        DBG ( "...found bootmgfw_EX.efi in initrd: %s\n", name );
+        bootmgfw_ex = vfile;
+    } else if ( ( nlen >= 4 ) &&
+            ( strcasecmp ( name + nlen - 4, ".wim" ) == 0 ) ) {
+        DBG ( "...found WIM file in initrd: %s\n", name );
+        bootwim = vfile;
+    }
+
+    return 0;
+}
+
+/**
+ * Extract files from Linux initrd media
+ *
+ * @ret rc      Return status code
+ */
+static int efi_extract_initrd ( void ) {
+    EFI_BOOT_SERVICES *bs = efi_systab->BootServices;
+    EFI_HANDLE lf2_handle;
+    EFI_LOAD_FILE2_PROTOCOL *lf2;
+    EFI_DEVICE_PATH_PROTOCOL *dp =
+        ( EFI_DEVICE_PATH_PROTOCOL * ) &efi_initrd_path;
+    UINTN initrd_len = 0;
+    UINTN pages;
+    void *initrd;
+    EFI_PHYSICAL_ADDRESS phys;
+    EFI_STATUS efirc;
+
+    /* Locate initrd media device */
+    efirc = bs->LocateDevicePath ( &efi_load_file2_protocol_guid,
+                       &dp, &lf2_handle );
+    if ( efirc != EFI_SUCCESS )
+        return -1;
+    DBG ( "...found initrd media device\n" );
+
+    /* Get LoadFile2 protocol */
+    efirc = bs->HandleProtocol ( lf2_handle, &efi_load_file2_protocol_guid,
+                     ( void ** ) &lf2 );
+    if ( efirc != EFI_SUCCESS )
+        die ( "Could not get LoadFile2 protocol.\n" );
+
+    /* Get initrd size */
+    efirc = lf2->LoadFile ( lf2, dp, FALSE, &initrd_len, NULL );
+    if ( initrd_len == 0 )
+        die ( "Could not get initrd size\n" );
+
+    /* Allocate memory */
+    pages = ( ( initrd_len + PAGE_SIZE - 1 ) / PAGE_SIZE );
+    if ( ( efirc = bs->AllocatePages ( AllocateAnyPages,
+                       EfiLoaderData, pages,
+                       &phys ) ) != 0 ) {
+        die ( "Could not allocate %ld pages: %#lx\n",
+              ( ( unsigned long ) pages ),
+              ( ( unsigned long ) efirc ) );
+    }
+    initrd = ( ( void * ) ( intptr_t ) phys );
+
+    /* Read initrd */
+    efirc = lf2->LoadFile ( lf2, dp, FALSE, &initrd_len, initrd );
+    if ( efirc != EFI_SUCCESS )
+        die ( "Could not read initrd.\n" );
+
+    efi_read_func = vdisk_read_mem_file;
+
+    /* Extract CPIO archive */
+    if ( cpio_extract ( initrd, initrd_len, efi_add_file ) != 0 )
+        die ( "FATAL: could not extract initrd files\n" );
+
+    return 0;
+}
+
+/**
  * Extract files from EFI file system
  *
  * @v handle		Device handle
@@ -139,7 +250,6 @@ void efi_extract ( EFI_HANDLE handle ) {
 		CHAR16 name[ VDISK_NAME_LEN + 1 /* WNUL */ ];
 	} __attribute__ (( packed )) info;
 	char name[ VDISK_NAME_LEN + 1 /* NUL */ ];
-	struct vdisk_file *wim = NULL;
 	struct vdisk_file *bootarch = NULL;
 	struct vdisk_file *vfile;
 	EFI_FILE_PROTOCOL *root;
@@ -147,6 +257,16 @@ void efi_extract ( EFI_HANDLE handle ) {
 	UINTN size;
 	CHAR16 *wname;
 	EFI_STATUS efirc;
+
+	bootwim = NULL;
+    bootmgfw = NULL;
+    bootmgfw_ex = NULL;
+
+    /* Try to extract files from initrd media first */
+    if ( efi_extract_initrd () == 0 ) {
+        DBG ( "...initrd extracted successfully\n" );
+        goto process_wim;
+    }
 
 	/* Open file system */
 	if ( ( efirc = bs->OpenProtocol ( handle,
@@ -212,7 +332,7 @@ void efi_extract ( EFI_HANDLE handle ) {
 		} else if ( wcscasecmp ( ( wname + ( wcslen ( wname ) - 4 ) ),
 					 L".wim" ) == 0 ) {
 			DBG ( "...found WIM file %ls\n", wname );
-			wim = vfile;
+			bootwim = vfile;
 		}
 	}
 
@@ -226,22 +346,23 @@ void efi_extract ( EFI_HANDLE handle ) {
 		bootmgfw_ex = NULL;
 	}
 
+process_wim:
 	/* Extract bootloader(s) from WIM if none are explicitly provided */
-	if ( wim && ( ! bootmgfw ) && ( ! bootmgfw_ex ) ) {
-		if ( ( bootmgfw = wim_add_file ( wim, cmdline_index,
+	if ( bootwim && ( ! bootmgfw ) && ( ! bootmgfw_ex ) ) {
+		if ( ( bootmgfw = wim_add_file ( bootwim, cmdline_index,
 						 bootmgfw_path ) ) ) {
 			DBG ( "...extracted %ls\n", bootmgfw_path );
 		}
-		if ( ( bootmgfw_ex = wim_add_file ( wim, cmdline_index,
+		if ( ( bootmgfw_ex = wim_add_file ( bootwim, cmdline_index,
 						    bootmgfw_ex_path ) ) ) {
 			DBG ( "...extracted %ls\n", bootmgfw_ex_path );
 		}
 	}
 
 	/* Process WIM image */
-	if ( wim ) {
-		vdisk_patch_file ( wim, patch_wim );
-		wim_add_files ( wim, cmdline_index, efi_wim_paths );
+	if ( bootwim ) {
+		vdisk_patch_file ( bootwim, patch_wim );
+		wim_add_files ( bootwim, cmdline_index, efi_wim_paths );
 	}
 
 	/* Check that we have a boot file */
