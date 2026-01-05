@@ -69,6 +69,9 @@ struct vdisk_file *bootmgfw_ex;
 /** WIM image file (from initrd or filesystem) */
 static struct vdisk_file *bootwim;
 
+/** Architecture‑specific bootloader file */
+struct vdisk_file *bootarch;
+
 /** Linux initrd media device path */
 static struct {
     VENDOR_DEVICE_PATH vendor;
@@ -159,9 +162,12 @@ static int efi_add_file ( const char *name, void *data, size_t len ) {
     vfile = vdisk_add_file ( name, data, len, efi_read_func );
 
     /* Detect bootloaders and WIM files */
-    if ( strcasecmp ( name, "bootmgfw.efi" ) == 0 ) {
-        DBG ( "...found bootmgfw.efi in initrd: %s\n", name );
-        bootmgfw = vfile;
+	if ( strcasecmp ( name, efi_bootarch_name() ) == 0 ) {
+		DBG ( "...found bootloader file %s\n", name );
+		bootarch = vfile;
+	} else if ( strcasecmp ( name, "bootmgfw.efi" ) == 0 ) {
+		DBG ( "...found bootmgfw.efi in initrd: %s\n", name );
+		bootmgfw = vfile;
     } else if ( strcasecmp ( name, "bootmgfw_EX.efi" ) == 0 ) {
         DBG ( "...found bootmgfw_EX.efi in initrd: %s\n", name );
         bootmgfw_ex = vfile;
@@ -253,7 +259,6 @@ void efi_extract ( EFI_HANDLE handle ) {
 		CHAR16 name[ VDISK_NAME_LEN + 1 /* WNUL */ ];
 	} __attribute__ (( packed )) info;
 	char name[ VDISK_NAME_LEN + 1 /* NUL */ ];
-	struct vdisk_file *bootarch = NULL;
 	struct vdisk_file *vfile;
 	EFI_FILE_PROTOCOL *root;
 	EFI_FILE_PROTOCOL *file;
@@ -264,6 +269,7 @@ void efi_extract ( EFI_HANDLE handle ) {
 	bootwim = NULL;
     bootmgfw = NULL;
     bootmgfw_ex = NULL;
+	bootarch = NULL;
 
     /* Try to extract files from initrd media first */
     if ( efi_extract_initrd () == 0 ) {
@@ -339,6 +345,7 @@ void efi_extract ( EFI_HANDLE handle ) {
 		}
 	}
 
+process_wim:
 	/* Use only boot<arch>.efi if provided */
 	if ( bootarch ) {
 		if ( bootmgfw )
@@ -349,7 +356,6 @@ void efi_extract ( EFI_HANDLE handle ) {
 		bootmgfw_ex = NULL;
 	}
 
-process_wim:
 	/* Extract bootloader(s) from WIM if none are explicitly provided */
 	if ( bootwim && ( ! bootmgfw ) && ( ! bootmgfw_ex ) ) {
 		if ( ( bootmgfw = wim_add_file ( bootwim, cmdline_index,
