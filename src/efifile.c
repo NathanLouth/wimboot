@@ -165,8 +165,11 @@ static int efi_add_file ( const char *name, void *data, size_t len ) {
     } else if ( strcasecmp ( name, "bootmgfw_EX.efi" ) == 0 ) {
         DBG ( "...found bootmgfw_EX.efi in initrd: %s\n", name );
         bootmgfw_ex = vfile;
-    } else if ( ( nlen >= 4 ) &&
-            ( strcasecmp ( name + nlen - 4, ".wim" ) == 0 ) ) {
+    } else if ( strcasecmp ( name, "BCD" ) == 0 ) {
+		DBG ( "...found BCD\n" );
+		vdisk_patch_file ( vfile, efi_patch_bcd );
+	} else if ( ( nlen >= 4 ) &&
+        ( strcasecmp ( name + nlen - 4, ".wim" ) == 0 ) ) {
         DBG ( "...found WIM file in initrd: %s\n", name );
         bootwim = vfile;
     }
